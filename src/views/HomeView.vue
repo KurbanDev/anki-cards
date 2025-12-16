@@ -1,320 +1,38 @@
 <script setup lang="ts">
-import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import Button from "@/components/ui/Button.vue";
 import Dialog from "@/components/ui/Dialog.vue";
 import DialogTitle from "@/components/ui/DialogTitle.vue";
 import Badge from "@/components/ui/Badge.vue";
-import {Card, Difficulty} from "@/composables/Card.js";
 import Textarea from "@/components/ui/Textarea.vue";
-import {createClient} from "@supabase/supabase-js";
-import {useAi} from "@/composables/useAi";
-
-const LS_KEY = "cards-data";
-
-
-// ========= Supabase =========
-const supabaseUrl = 'https://glgjvggbedqijbqogtfx.supabase.co'
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdsZ2p2Z2diZWRxaWpicW9ndGZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxNDc3OTksImV4cCI6MjA4MDcyMzc5OX0.4m8TQorl64ila2m3wfndAC94YBH_vq7EtYdrxLNJWog'
-const supabase = createClient(supabaseUrl, supabaseKey)
-
-// ========= Рефы / состояние =========
-const isLearningMode = ref(false);
-const showImportModal = ref(false);
-const isShowAnswer = ref(false);
-const importJsonForm = ref("");
-const isLoadingAi = ref(false)
-
-const isSyncing = ref(false);
-const syncError = ref<string | null>(null);
-const syncSuccess = ref<string | null>(null);
-
-const cards = ref<Card[]>(loadCards() ?? []);
-const version = ref(localStorage.getItem('cards-version') ?? 1)
-
-const now = ref(Date.now());
-let timerId: any;
-
-// ========= Тип для JSON-состояния =========
-interface CardState {
-  q: string;
-  a: string;
-  level: number;
-  nextShowDate: number;
-}
-
-// ========= Компьютед =========
-const dueCards = computed(() =>
-    cards.value
-        .filter((c: Card) => c.getNextShowDate() <= now.value)
-        .sort((a: Card, b: Card) => a.getNextShowDate() - b.getNextShowDate())
-);
-
-const currentCard = computed(() => dueCards.value[0] ?? null);
-
-// ========= Работа с localStorage =========
-function loadCards(): Card[] | null {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-
-    if (!raw) return null;
-
-    const parsed: CardState[] = JSON.parse(raw);
-
-    return parsed.map((c) => {
-      return new Card({
-        q: c.q,
-        a: c.a,
-        level: c.level,
-        nextShowDate: c.nextShowDate,
-      });
-    });
-  } catch (e) {
-    console.error("Ошибка чтения localStorage:", e);
-    return null;
-  }
-}
-
-function serializeCards(): CardState[] {
-  // Преобразуем Card в простой json
-  return cards.value.map((c) => ({
-    q: c.getQuestion(),
-    a: c.getAnswer(),
-    level: c.getLevel(),
-    nextShowDate: c.getNextShowDate(),
-  }));
-}
-
-function deserializeCards(data: CardState[]): Card[] {
-  return data.map(
-      (c) =>
-          new Card({
-            q: c.q,
-            a: c.a,
-            level: c.level,
-            nextShowDate: c.nextShowDate,
-          })
-  );
-}
-
-
-// ========= Логика карточек =========
-
-function answer(difficulty: Difficulty) {
-  if (!currentCard.value) return;
-
-  currentCard.value.selectDifficulty(difficulty);
-
-  isShowAnswer.value = false;
-
-  if (!dueCards.value.length) {
-    isLearningMode.value = false;
-  }
-}
-
-function importJson() {
-  try {
-    const parsedText = JSON.parse(importJsonForm.value);
-    importJsonForm.value = "";
-
-    parsedText.map((c: any) => {
-      cards.value.push(
-          new Card({
-            q: c.q,
-            a: c.a,
-            level: 0,
-            nextShowDate: Date.now(),
-          })
-      );
-    });
-  } catch (e) {
-    console.error("Ошибка парсинга json при импорте:", e);
-  }
-}
-
-// ========= Supabase: сохранение / загрузка =========
-
-async function saveStateToSupabase() {
-
-
-  // userId больше не нужен
-  isSyncing.value = true;
-  syncError.value = null;
-  syncSuccess.value = null;
-
-  const data = serializeCards();
-
-  try {
-
-
-    // 1. Ищем первую строку в таблице state
-    const {data: rows, error: selectError} = await supabase
-        .from("state")
-        .select("id, version")
-        .order("id", {ascending: true})
-        .limit(1);
-
-    if (rows[0].version > version.value) {
-      if (!confirm('Версия в базе выше вашей')) {
-        return;
-      }
-    }
-
-    if (selectError) {
-      console.error("Ошибка чтения из Supabase:", selectError);
-      syncError.value = "Не удалось прочитать состояние из Supabase";
-      return;
-    }
-
-    if (rows && rows.length > 0) {
-      // 2. Строка есть — обновляем её
-      const id = rows[0].id;
-
-      const { data: updated, updateError } = await supabase
-          .from("state")
-          .update({ data })
-          .eq("id", id)
-          .select("version")
-          .single();
-
-      version.value = updated.version
-
-      if (updateError) {
-        console.error("Ошибка обновления в Supabase:", updateError);
-        syncError.value = "Не удалось обновить состояние в Supabase";
-        return;
-      }
-
-      syncSuccess.value = "Состояние успешно обновлено в Supabase";
-    } else {
-      // 3. Строк нет — создаём новую
-
-
-      console.log(version.value)
-
-      const {error: insertError} = await supabase
-          .from("state")
-          .insert({ data, version: 1 })
-          .select()
-          .single();
-
-      version.value = 1;
-
-      if (insertError) {
-        console.error("Ошибка создания записи в Supabase:", insertError);
-        syncError.value = "Не удалось создать состояние в Supabase";
-        return;
-      }
-
-      syncSuccess.value = "Состояние успешно создано в Supabase";
-    }
-  } catch (e) {
-    console.error("Неизвестная ошибка при сохранении в Supabase:", e);
-    syncError.value = "Произошла ошибка при сохранении в Supabase";
-  } finally {
-    isSyncing.value = false;
-  }
-}
-
-async function loadStateFromSupabase() {
-
-  // localStorage.setItem('cards-version', String(Date.now()))
-
-  /*  if (!userId.value) {
-      ensureUserId();
-    }
-    if (!userId.value) return;*/
-
-  isSyncing.value = true;
-  syncError.value = null;
-  syncSuccess.value = null;
-
-  try {
-    const {data, error} = await supabase
-        .from("state")
-        .select("data, version")
-        .single();
-
-    version.value = data.version;
-
-    if (error) {
-      console.error("Ошибка загрузки из Supabase:", error);
-      syncError.value = "Не удалось загрузить состояние из Supabase";
-      return;
-    }
-
-    if (data && data.data) {
-      cards.value = deserializeCards(data.data as CardState[]);
-      syncSuccess.value = "Состояние успешно загружено из Supabase";
-    } else {
-      syncError.value = "Для этого пользователя нет сохранённого состояния";
-    }
-  } catch (e) {
-    console.error("Неизвестная ошибка при загрузке из Supabase:", e);
-    syncError.value = "Произошла ошибка при загрузке из Supabase";
-  } finally {
-    isSyncing.value = false;
-  }
-}
-
-
-function clear() {
-  if (confirm('Подтвердите удаление')) {
-    cards.value = [];
-  }
-}
-
-// ========= Жизненный цикл =========
-
-onMounted(async () => {
-  // ensureUserId();
-
-  const {data: rows, error: selectError} = await supabase
-      .from("state")
-      .select("version")
-      .order("id", {ascending: true})
-      .limit(1);
-
-  if (rows[0].version > Number(version.value)) {
-    alert('Данные на сервере опережают локальные. Необходимо загрузить данные из базы')
-  }
-
-  timerId = setInterval(() => (now.value = Date.now()), 60 * 1000);
-});
-
-onBeforeUnmount(() => clearInterval(timerId));
-
-// По-прежнему сохраняем снапшот в localStorage (как сейчас)
-watch(
-    cards,
-    (newVal) => localStorage.setItem(LS_KEY, JSON.stringify(serializeCards())),
-    {deep: true}
-);
-
-watch(version, (newVal) => localStorage.setItem('cards-version', String(newVal)))
-
-
-function removeCard(card: Card) {
-  if (confirm('Подтверждение')) {
-    cards.value = cards.value.filter(c => c.getQuestion() !== card.getQuestion());
-  }
-  isShowAnswer.value = false
-}
-
-function getPrompt() {
-  return `Я отвечаю на вопросы. У меня есть вопрос ${currentCard.value.getQuestion()}, а в ответе указано: ${currentCard.value.getAnswer()}. Объясни подробно этот ответ.`;
-}
-
-async function aiDescription() {
-  if (isLoadingAi.value) {
-    return;
-  }
-  const context = `Я отвечаю на вопросы. У меня есть вопрос ${currentCard.value.getQuestion()}, а в ответе указано: ${currentCard.value.getAnswer()}. Объясни подробно этот ответ.`;
-  isLoadingAi.value = true
-  await useAi().send(context).then((a) => {
-    currentCard.value.detailAnswer = a
-  })
-  isLoadingAi.value = false
-}
+import {useCardsState} from "@/composables/useCardsState";
+
+const {
+  // state
+  isLearningMode,
+  showImportModal,
+  isShowAnswer,
+  importJsonForm,
+  isLoadingAi,
+  isSyncing,
+  syncError,
+  syncSuccess,
+  cards,
+  version,
+  dueCards,
+  currentCard,
+  currentCardDetail,
+
+  // actions
+  startLearning,
+  clearCards,
+  answer,
+  importJson,
+  saveStateToSupabase,
+  loadStateFromSupabase,
+  removeCard,
+  aiDescription,
+  getPrompt,
+} = useCardsState();
 </script>
 
 <template>
@@ -324,7 +42,7 @@ async function aiDescription() {
       <div class="flex items-center gap-x-2 justify-end m:justify-center m:grid m:grid-cols-2 m:gap-1">
 
 
-        <Button class="m:flex-1" size="sm" @click="isLearningMode = true">
+        <Button class="m:flex-1" size="sm" @click="startLearning">
           Начать изучение
           <Badge variant="secondary">+{{ dueCards.length }}</Badge>
         </Button>
@@ -333,7 +51,7 @@ async function aiDescription() {
           Импортировать вопросы
         </Button>
 
-        <Button class="m:flex-1" size="sm" @click="clear">Очистить</Button>
+        <Button class="m:flex-1" size="sm" @click="clearCards">Очистить</Button>
 
         <!-- новые кнопки работы с Supabase -->
         <Button
@@ -428,13 +146,13 @@ async function aiDescription() {
         <div v-if="isShowAnswer" class="mb-4">
           <div class="mb-1 text-xs">Ответ:</div>
           <div>{{ currentCard.getAnswer() }}</div>
-          <div v-if="currentCard.detailAnswer">
+          <div v-if="currentCardDetail">
             <hr class="my-5">
-            {{ currentCard.detailAnswer }}
+            {{ currentCardDetail }}
           </div>
           <div v-else class="mt-5">
             <Button @click="aiDescription">{{ isLoadingAi ? 'Loading' : 'AI объяснение' }}</Button>
-            <a class="ml-2" target="_blank" :href="`https://chatgpt.com/?prompt=${getPrompt()}`"><Button @click="">Спросить в ChatGPT</Button></a>
+            <a class="ml-2" target="_blank" :href="`https://chatgpt.com/?prompt=${getPrompt()}`"><Button>Спросить в ChatGPT</Button></a>
           </div>
         </div>
       </div>
