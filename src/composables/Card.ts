@@ -1,4 +1,3 @@
-import {reactive} from "vue";
 import {INTERVAL_TABLE} from "@/composables/Cards";
 
 export type Difficulty = "again" | "hard" | "good";
@@ -7,7 +6,7 @@ export class Card {
 
     private readonly q: string
     private readonly a: string
-    private detailAnswer: string
+    private detailAnswer?: string
 
     private nextShowDate: number
     private level: number
@@ -41,6 +40,14 @@ export class Card {
 
     getNextShowDate() {
         return this.nextShowDate
+    }
+
+    getDetailAnswer() {
+        return this.detailAnswer
+    }
+
+    setDetailAnswer(detail: string) {
+        this.detailAnswer = detail
     }
 
     calculateMinutesNextShowDateByDifficulty(difficulty: Difficulty) {
